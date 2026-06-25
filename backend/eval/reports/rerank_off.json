@@ -1,0 +1,170 @@
+{
+  "experiment": "rerank_off",
+  "timestamp": "2026-06-22T15:09:32.657292",
+  "config": {
+    "chunk_strategy": "recursive",
+    "chunk_size": 512,
+    "embedding_provider": "qianwen",
+    "embedding_model": "text-embedding-v3",
+    "index_type": "HNSW",
+    "retrieval_top_k": 20,
+    "rerank_enabled": false
+  },
+  "summary": {
+    "total_questions": 10,
+    "recall@1": 0.8,
+    "recall@3": 0.9,
+    "recall@5": 1.0,
+    "mrr": 0.8583,
+    "avg_time_seconds": 47.31,
+    "by_difficulty": {
+      "easy": {
+        "count": 4,
+        "recall_5": 1.0,
+        "mrr": 0.8333333333333333
+      },
+      "medium": {
+        "count": 4,
+        "recall_5": 1.0,
+        "mrr": 1.0
+      },
+      "hard": {
+        "count": 2,
+        "recall_5": 1.0,
+        "mrr": 0.625
+      }
+    }
+  },
+  "details": [
+    {
+      "question": "CAP定理是谁提出的，包含哪三个要素",
+      "difficulty": "easy",
+      "type": "精确事实查询",
+      "time_seconds": 48.46862983703613,
+      "evaluation": {
+        "recall_1": true,
+        "recall_3": true,
+        "recall_5": true,
+        "mrr_score": 1.0,
+        "hit_rank": 1
+      }
+    },
+    {
+      "question": "批处理和管道-过滤器风格的主要区别是什么",
+      "difficulty": "medium",
+      "type": "语义理解",
+      "time_seconds": 56.31975603103638,
+      "evaluation": {
+        "recall_1": true,
+        "recall_3": true,
+        "recall_5": true,
+        "mrr_score": 1.0,
+        "hit_rank": 1
+      }
+    },
+    {
+      "question": "黑板体系结构风格的典型应用领域有哪些",
+      "difficulty": "easy",
+      "type": "精确事实查询",
+      "time_seconds": 41.94095802307129,
+      "evaluation": {
+        "recall_1": false,
+        "recall_3": true,
+        "recall_5": true,
+        "mrr_score": 0.3333333333333333,
+        "hit_rank": 3
+      }
+    },
+    {
+      "question": "ATAM评估方法是在哪个方法基础上发展来的",
+      "difficulty": "easy",
+      "type": "精确事实查询",
+      "time_seconds": 35.53361129760742,
+      "evaluation": {
+        "recall_1": true,
+        "recall_3": true,
+        "recall_5": true,
+        "mrr_score": 1.0,
+        "hit_rank": 1
+      }
+    },
+    {
+      "question": "微服务系统有哪些核心特征",
+      "difficulty": "medium",
+      "type": "列举",
+      "time_seconds": 53.8252489566803,
+      "evaluation": {
+        "recall_1": true,
+        "recall_3": true,
+        "recall_5": true,
+        "mrr_score": 1.0,
+        "hit_rank": 1
+      }
+    },
+    {
+      "question": "提升可修改性的两个主要方向是什么",
+      "difficulty": "easy",
+      "type": "精确事实查询",
+      "time_seconds": 39.54870939254761,
+      "evaluation": {
+        "recall_1": true,
+        "recall_3": true,
+        "recall_5": true,
+        "mrr_score": 1.0,
+        "hit_rank": 1
+      }
+    },
+    {
+      "question": "可用性的计算公式是什么，MTBF和MTTR分别代表什么",
+      "difficulty": "medium",
+      "type": "精确事实查询",
+      "time_seconds": 50.51025748252869,
+      "evaluation": {
+        "recall_1": true,
+        "recall_3": true,
+        "recall_5": true,
+        "mrr_score": 1.0,
+        "hit_rank": 1
+      }
+    },
+    {
+      "question": "Lambda架构和Kappa架构有什么区别",
+      "difficulty": "hard",
+      "type": "对比分析",
+      "time_seconds": 61.41101694107056,
+      "evaluation": {
+        "recall_1": false,
+        "recall_3": false,
+        "recall_5": true,
+        "mrr_score": 0.25,
+        "hit_rank": 4
+      }
+    },
+    {
+      "question": "效用树在ATAM评估中起什么作用",
+      "difficulty": "medium",
+      "type": "语义理解",
+      "time_seconds": 42.27711510658264,
+      "evaluation": {
+        "recall_1": true,
+        "recall_3": true,
+        "recall_5": true,
+        "mrr_score": 1.0,
+        "hit_rank": 1
+      }
+    },
+    {
+      "question": "提升性能的策略包括哪些方面，各举一个例子",
+      "difficulty": "hard",
+      "type": "列举+举例",
+      "time_seconds": 43.24886441230774,
+      "evaluation": {
+        "recall_1": true,
+        "recall_3": true,
+        "recall_5": true,
+        "mrr_score": 1.0,
+        "hit_rank": 1
+      }
+    }
+  ]
+}

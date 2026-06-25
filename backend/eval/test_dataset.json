@@ -1,0 +1,72 @@
+[
+  {
+    "id": 1,
+    "question": "CAP定理是谁提出的，包含哪三个要素",
+    "expected_docs": ["3de908ea-b91a-47f7-99ed-c80dcdcba2aa.pptx"],
+    "difficulty": "easy",
+    "type": "精确事实查询"
+  },
+  {
+    "id": 2,
+    "question": "批处理和管道-过滤器风格的主要区别是什么",
+    "expected_docs": ["3de908ea-b91a-47f7-99ed-c80dcdcba2aa.pptx"],
+    "difficulty": "medium",
+    "type": "语义理解"
+  },
+  {
+    "id": 3,
+    "question": "黑板体系结构风格的典型应用领域有哪些",
+    "expected_docs": ["3de908ea-b91a-47f7-99ed-c80dcdcba2aa.pptx"],
+    "difficulty": "easy",
+    "type": "精确事实查询"
+  },
+  {
+    "id": 4,
+    "question": "ATAM评估方法是在哪个方法基础上发展来的",
+    "expected_docs": ["3de908ea-b91a-47f7-99ed-c80dcdcba2aa.pptx"],
+    "difficulty": "easy",
+    "type": "精确事实查询"
+  },
+  {
+    "id": 5,
+    "question": "微服务系统有哪些核心特征",
+    "expected_docs": ["3de908ea-b91a-47f7-99ed-c80dcdcba2aa.pptx"],
+    "difficulty": "medium",
+    "type": "列举"
+  },
+  {
+    "id": 6,
+    "question": "提升可修改性的两个主要方向是什么",
+    "expected_docs": ["3de908ea-b91a-47f7-99ed-c80dcdcba2aa.pptx"],
+    "difficulty": "easy",
+    "type": "精确事实查询"
+  },
+  {
+    "id": 7,
+    "question": "可用性的计算公式是什么，MTBF和MTTR分别代表什么",
+    "expected_docs": ["3de908ea-b91a-47f7-99ed-c80dcdcba2aa.pptx"],
+    "difficulty": "medium",
+    "type": "精确事实查询"
+  },
+  {
+    "id": 8,
+    "question": "Lambda架构和Kappa架构有什么区别",
+    "expected_docs": ["3de908ea-b91a-47f7-99ed-c80dcdcba2aa.pptx"],
+    "difficulty": "hard",
+    "type": "对比分析"
+  },
+  {
+    "id": 9,
+    "question": "效用树在ATAM评估中起什么作用",
+    "expected_docs": ["3de908ea-b91a-47f7-99ed-c80dcdcba2aa.pptx"],
+    "difficulty": "medium",
+    "type": "语义理解"
+  },
+  {
+    "id": 10,
+    "question": "提升性能的策略包括哪些方面，各举一个例子",
+    "expected_docs": ["3de908ea-b91a-47f7-99ed-c80dcdcba2aa.pptx"],
+    "difficulty": "hard",
+    "type": "列举+举例"
+  }
+]

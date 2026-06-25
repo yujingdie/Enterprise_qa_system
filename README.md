@@ -1,0 +1,198 @@
+# 企业知识问答系统
+
+基于 **Milvus + RAG** 的企业内部知识检索与问答系统。上传文档 → 向量化入库 → 智能检索 → LLM 生成答案，支持多轮对话与来源引用。
+
+![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.110-green?logo=fastapi)
+![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)
+![Milvus](https://img.shields.io/badge/Milvus-2.4-00A1E0)
+![Docker](https://img.shields.io/badge/Docker-Compose-blue?logo=docker)
+
+## 功能特性
+
+- 📄 **多格式文档解析** — 支持 PDF、Word、PPT、Markdown、TXT，扫描件自动 OCR
+- 🧠 **语义切分** — 基于段落边界的智能切分，保留文档结构
+- 🔍 **Agent Loop 检索** — LLM 自主决策搜索策略，多轮检索后生成答案
+- 🎯 **Reranker 精排** — BGE-reranker-v2-m3 cross-encoder 二次排序
+- 💬 **多会话管理** — 创建/切换/删除对话，历史记录持久化
+- 📡 **SSE 流式输出** — 实时流式返回答案，支持停止生成
+- 📊 **检索评估体系** — Recall@k、MRR 指标，支持对比实验
+
+## 技术栈
+
+| 层级 | 技术选型 |
+|------|---------|
+| LLM | MiMo 2.5 Pro（Anthropic 兼容 API） |
+| Embedding | 千问百炼 text-embedding-v4（1024 维） |
+| 向量库 | Milvus Standalone（HNSW 索引） |
+| 业务库 | PostgreSQL 16（JSONB 存储来源信息） |
+| 后端 | Python FastAPI + SQLAlchemy |
+| 前端 | React 18 + Vite + TypeScript + Tailwind CSS |
+| 部署 | Docker Compose（6 个容器） |
+
+## 快速开始
+
+### 环境要求
+
+- Docker & Docker Compose
+-  LLM 模型 API Key（用于答案生成和查询改写）
+-  Embedding 模型 API Key（用于文本向量化）
+
+### 启动
+
+```bash
+# 1. 克隆项目
+git clone <your-repo-url>
+cd Enterprise_qa_system
+
+# 2. 配置环境变量
+cp backend/.env.example backend/.env
+# 编辑 backend/.env，填入你的 API Key
+
+# 3. 启动所有服务
+docker-compose up -d
+
+# 4. 访问
+# 前端: http://localhost:3000
+# 后端 API 文档: http://localhost:8000/docs
+```
+
+### 默认账户
+
+首次访问需注册账号，注册后登录。
+
+## 项目结构
+
+```
+Enterprise_qa_system/
+├── backend/
+│   ├── app/
+│   │   ├── main.py              # FastAPI 入口，lifespan 初始化
+│   │   ├── api/
+│   │   │   ├── qa.py            # 问答接口（Agent Loop + SSE）
+│   │   │   ├── auth.py          # 注册/登录/JWT
+│   │   │   ├── documents.py     # 文档上传/删除/列表
+│   │   │   └── history.py       # 会话历史
+│   │   ├── pipeline/
+│   │   │   ├── query.py         # 查询管线（retrieval）
+│   │   │   ├── ingest.py        # 入库管线
+│   │   │   ├── chunker.py       # 语义切分
+│   │   │   ├── reranker.py      # BGE-reranker 精排
+│   │   │   └── parser/          # 文档解析（PDF/Word/PPT/Text）
+│   │   ├── milvus/              # 向量库操作（schema/index/searcher/writer）
+│   │   ├── llm/client.py        # LLM 调用（Anthropic SDK）
+│   │   └── embed/client.py      # Embedding（千问 API / 本地 BGE）
+│   ├── config/
+│   │   ├── pipeline.yml         # 切分/检索/Milvus 参数配置
+│   │   └── prompts.yml          # 提示词模板
+│   ├── eval/                    # 检索质量评估（Recall@k, MRR）
+│   └── tests/                   # 单元测试
+├── frontend/
+│   ├── src/
+│   │   ├── pages/               # 页面组件
+│   │   ├── components/          # UI 组件
+│   │   ├── api/                 # API 客户端 + SSE 流式处理
+│   │   └── types/               # TypeScript 类型定义
+│   └── nginx.conf               # 反向代理配置
+├── docker-compose.yml           # 6 个容器编排
+└── .env.example                 # 环境变量模板
+```
+
+## 架构设计
+
+### 查询流程
+
+```
+用户提问
+  ↓
+Agent Loop（LLM 自主决策，最多 4 轮）
+  ↓
+search_knowledge_base（向量检索）
+  ↓  Embedding → Milvus HNSW 粗排 Top 20 → 阈值过滤 → Reranker 精排 Top 5
+  ↓
+LLM 基于检索结果生成答案（SSE 流式输出）
+  ↓
+前端展示答案 + 来源卡片（含相似度分数）
+```
+
+### 入库流程
+
+```
+上传文档
+  ↓
+解析（PDF/Word/PPT/Text）
+  ↓
+语义切分（按段落边界，目标 512 字）
+  ↓
+Embedding（千问 text-embedding-v4，1024 维）
+  ↓
+批量写入 Milvus（HNSW 索引，COSINE 相似度）
+  ↓
+更新 PostgreSQL 文档状态
+```
+
+### 核心配置
+
+| 配置项 | 默认值 | 说明 |
+|-------|-------|------|
+| 切分策略 | semantic | 语义切分（可选 fixed/recursive） |
+| 切分大小 | 512 字 | 每个 chunk 的目标字符数 |
+| Embedding | text-embedding-v4 | 千问百炼 API |
+| 索引类型 | HNSW | M=16, ef_construction=256 |
+| 粗排 Top K | 20 | Milvus 返回的候选数 |
+| 精排 Top K | 5 | Reranker 后的最终结果数 |
+| 相似度阈值 | 0.3 | 低于此分数的结果被过滤 |
+
+## 评估体系
+
+```bash
+# 默认评估
+docker-compose exec backend python -m eval.run_eval
+
+# 对比实验
+docker-compose exec backend python -m eval.run_eval --experiment rerank    # Rerank 开关
+docker-compose exec backend python -m eval.run_eval --experiment search    # Dense vs Hybrid
+docker-compose exec backend python -m eval.run_eval --experiment chunk     # 切分策略
+docker-compose exec backend python -m eval.run_eval --experiment all       # 全部实验
+```
+
+评估指标：Recall@1、Recall@3、Recall@5、MRR
+
+## 测试
+
+```bash
+# 运行全部测试
+docker-compose exec backend python -m pytest tests/ -v
+
+# 单个测试
+docker-compose exec backend python -m pytest tests/test_chunker.py -v
+```
+
+## 配置说明
+
+### 切换 Embedding 模型
+
+编辑 `backend/.env`：
+
+```bash
+# 使用千问 API（推荐）
+EMBEDDING_PROVIDER=qianwen
+EMBEDDING_MODEL=text-embedding-v4
+
+# 使用本地 BGE 模型（需安装 sentence-transformers）
+EMBEDDING_PROVIDER=local
+EMBEDDING_MODEL=BAAI/bge-large-zh-v1.5
+```
+
+### 关闭 Reranker
+
+编辑 `backend/config/pipeline.yml`：
+
+```yaml
+reranker:
+  enabled: false    # 关闭后跳过精排，响应更快
+```
+
+## License
+
+MIT

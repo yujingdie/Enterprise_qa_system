@@ -1,0 +1,39 @@
+# ============ 文档切分配置 ============
+chunk:
+  size: 512                    # 每个切片的目标字符数
+  overlap: 0                   # 语义切分不需要重叠（fixed/recursive 策略时可设为 32-64）
+  strategy: semantic           # fixed | recursive | semantic（推荐 semantic）
+
+# ============ Embedding 配置 ============
+embedding:
+  provider: qianwen            # local | qianwen
+  dimension: 1024
+  batch_size: 10
+
+# ============ Milvus 配置 ============
+milvus:
+  collection: knowledge_base
+  index_type: HNSW             # HNSW | IVF_FLAT | IVF_SQ8
+  metric_type: COSINE          # L2 | IP | COSINE
+  hnsw:
+    M: 16                      # 每个节点的最大连接数
+    ef_construction: 256       # 建索引时的搜索宽度
+    ef_search: 128             # 查询时的搜索宽度
+
+# ============ 检索配置 ============
+retrieval:
+  top_k: 20                    # Milvus 粗排取多少条
+  rerank_top_k: 5              # Rerank 精排后取多少条
+  use_sparse: true             # 是否启用稀疏向量混合检索
+  score_threshold: 0.3         # 最低相关度阈值
+
+# ============ 重排序配置 ============
+reranker:
+  enabled: true
+  model: BAAI/bge-reranker-v2-m3
+  top_k: 5
+
+# ============ LLM 配置 ============
+llm:
+  temperature: 0.3
+  max_tokens: 2048
