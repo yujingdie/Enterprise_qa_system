@@ -18,6 +18,11 @@ backend/uploads/*
 backend/reingest.py
 backend/fix_tool_call.py
 backend/test_sanitize.py
+backend/fix_streaming.py
+backend/fix_sanitize_final.py
+backend/revert_dedup.py
+backend/test_regex.py
+backend/add_streaming_sanitize.py
 
 # Reranker 模型（太大，不入仓库）
 backend/reranker_model/

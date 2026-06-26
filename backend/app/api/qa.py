@@ -21,13 +21,14 @@ from sqlalchemy.orm import Session as DBSession
 from app.api.deps import get_current_user, get_db
 from app.core.config import config
 from app.core.database import SessionLocal
-from app.llm.client import chat_with_tools, chat_stream_with_history
+from app.llm.client import chat, chat_stream_with_history
 from app.milvus.schema import get_collection
 from app.milvus.searcher import search_dense
 from app.models.conversation import Conversation
 from app.models.document import Document
 from app.models.session import Session
 from app.embed.client import embed
+from app.pipeline.query import _parse_rewrite_result
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,6 @@ AGENT_SYSTEM_PROMPT = """\
 - 默认用 search_knowledge_base 搜索
 - 当用户明确提到文件名（如"claude.md"、"那个xx文件"）时，用 search_by_filename 精确读取
 - 当用户要求"列出所有文档"时，用 list_documents
-- 对 search_knowledge_base 的调用策略：简单明确的问题直接调用一次；复杂或模糊的问题，从两个不同角度改写成新的查询词，加上原文一共调用3次（原文+改写1+改写2）
 - 如果工具返回"搜索结果为空"或参考资料与问题无关，直接回复"知识库不存在对应内容，请上传相关文件"，不要列举文档类型或给建议
 - 当你已经通过工具获取了足够的信息时，必须立即停止调用工具，直接用自然语言总结回答。每个问题最多调用1-2次工具即可。
 - 绝对不要在回答中输出 tool_call、function_call、<tool_call>、<function>、<parameter> 等任何XML或工具调用格式的文本，只输出自然语言回答
@@ -119,9 +119,15 @@ async def _exec_search_knowledge_base(query: str, user_id: str) -> str:
 
         # Milvus 粗排
         results = search_dense(collection, query_vector[0], top_k=top_k, user_id=user_id)
+        logger.info("search[%s]: Milvus raw=%d, scores=%s",
+                     query[:30], len(results),
+                     [round(r["score"], 4) for r in results[:5]])
 
         # 阈值过滤
+        before = len(results)
         results = [r for r in results if r["score"] >= threshold]
+        logger.info("search[%s]: after_threshold=%d/%d",
+                     query[:30], len(results), before)
 
         if not results:
             return "搜索结果为空，未找到相关内容。"
@@ -315,9 +321,10 @@ async def _agent_loop_to_queue(question: str, user_id: str, history: list[dict] 
 
 async def _agent_loop(question: str, user_id: str, history: list[dict] | None = None):
     """
-    Agent Loop：LLM 自主决策调用工具，最多 MAX_TOOL_ROUNDS 轮。
-    Yields SSE 事件字符串。
-    客户端断开时，外部通过 Task.cancel() 中断此协程。
+    Agent Loop：
+    1. Query 改写判断（不带工具）→ 确定搜索策略
+    2. 直接搜索（不经过 LLM 工具调用）
+    3. 流式输出答案
     """
     messages = []
     # 加入历史对话（最近 10 轮）
@@ -326,135 +333,95 @@ async def _agent_loop(question: str, user_id: str, history: list[dict] | None = 
             messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": question})
 
-    all_sources = []
+    # === Step 1: Query 改写判断（不带工具） ===
+    yield _sse_event("tool_call", {
+        "name": "analyze_question",
+        "args": {},
+        "result": "正在分析问题",
+    })
 
-    for round_idx in range(MAX_TOOL_ROUNDS):
-        try:
-            response = await chat_with_tools(
-                messages=messages,
-                system_prompt=AGENT_SYSTEM_PROMPT,
-                tools=TOOLS,
-                temperature=0.3,
-            )
-        except Exception as e:
-            logger.error("Agent loop round %d LLM call failed: %s", round_idx + 1, e)
-            yield _sse_event("answer", "（LLM 服务暂不可用）")
-            return
-
-        # 检查是否有工具调用
-        tool_calls = [b for b in response.content if b.type == "tool_use"]
-        text_blocks = [b for b in response.content if b.type == "text"]
-
-        if tool_calls:
-            # 有工具调用：执行工具并收集结果（不管 stop_reason 是什么）
-            # 先把 assistant 消息（含 tool_use）加入 messages
-            messages.append({"role": "assistant", "content": response.content})
-
-            tool_results = []
-            for tc in tool_calls:
-                tool_name = tc.name
-                tool_args = tc.input
-                logger.info("Agent round %d: tool=%s args=%s", round_idx + 1, tool_name, tool_args)
-
-                # 通知前端正在执行工具
-                yield _sse_event("tool_call", {
-                    "name": tool_name,
-                    "args": tool_args,
-                    "round": round_idx + 1,
-                })
-
-                result_text = await _execute_tool(tool_name, tool_args, user_id, question)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tc.id,
-                    "content": result_text,
-                })
-
-                # 收集来源信息（按 doc+页码去重，分数排序，只留 top 5）
-                if tool_name in ("search_knowledge_base", "search_by_filename"):
-                    new_sources = _extract_sources_from_result(result_text)
-                    existing = {f"{s['doc_name']}_{s['page']}": s for s in all_sources}
-                    for s in new_sources:
-                        key = f"{s['doc_name']}_{s['page']}"
-                        if key not in existing or s["score"] > existing[key]["score"]:
-                            existing[key] = s
-                    all_sources = sorted(existing.values(), key=lambda x: x["score"], reverse=True)[:5]
-
-            # 把工具结果加入 messages，进入下一轮
-            messages.append({"role": "user", "content": tool_results})
-        else:
-            preview_text = text_blocks[0].text if text_blocks else ""
-
-            # 检测模型是否把 tool_call 写成了纯文本（MiMo 等模型常见）
-            text_tool_calls = _parse_text_tool_calls(preview_text)
-            if text_tool_calls:
-                logger.info("Agent round %d: detected text-based tool calls: %s",
-                            round_idx + 1, [c["name"] for c in text_tool_calls])
-                messages.append({"role": "assistant", "content": preview_text})
-                tool_results = []
-                for tc in text_tool_calls:
-                    tool_name = tc["name"]
-                    tool_args = tc["args"]
-                    logger.info("Agent round %d (text-based): tool=%s args=%s",
-                                round_idx + 1, tool_name, tool_args)
-                    yield _sse_event("tool_call", {
-                        "name": tool_name, "args": tool_args, "round": round_idx + 1,
-                    })
-                    result_text = await _execute_tool(tool_name, tool_args, user_id, question)
-                    tool_results.append({
-                        "type": "tool_result", "tool_use_id": f"text_tc_{round_idx}",
-                        "content": result_text,
-                    })
-                    if tool_name in ("search_knowledge_base", "search_by_filename"):
-                        new_sources = _extract_sources_from_result(result_text)
-                        existing = {f"{s['doc_name']}_{s['page']}": s for s in all_sources}
-                        for s in new_sources:
-                            key = f"{s['doc_name']}_{s['page']}"
-                            if key not in existing or s["score"] > existing[key]["score"]:
-                                existing[key] = s
-                        all_sources = sorted(existing.values(), key=lambda x: x["score"], reverse=True)[:5]
-                messages.append({"role": "user", "content": tool_results})
-                continue  # 不输出 XML，继续下一轮
-
-            # 没有工具调用，LLM 给出了最终答案 → 流式输出
-            not_found_keywords = ["未找到", "没有找到", "暂无", "没有相关", "未发现", "不存在对应内容"]
-            is_not_found = any(kw in preview_text for kw in not_found_keywords)
-
-            if all_sources and not is_not_found:
-                yield _sse_event("sources", all_sources)
-
-            try:
-                async for chunk in chat_stream_with_history(
-                    messages=messages,
-                    system_prompt=AGENT_SYSTEM_PROMPT,
-                    temperature=0.3,
-                ):
-                    yield _sse_event("answer", chunk)
-            except Exception as e:
-                logger.error("Agent final answer stream failed: %s", e)
-                yield _sse_event("answer", preview_text or "（生成答案时出错）")
-            return
-
-    # 达到最大轮数，强制 LLM 流式输出最终答案（不带工具）
-    logger.warning("Agent loop reached max rounds (%d), forcing final answer", MAX_TOOL_ROUNDS)
+    search_queries = [question]
     try:
-        if all_sources:
-            yield _sse_event("sources", all_sources)
-
-        forced_system = AGENT_SYSTEM_PROMPT + (
-            "\n\n【重要】你已经收集了足够的信息。"
-            "请直接用自然语言回答用户问题，不要输出任何 tool_call、function_call、XML 格式的内容。"
-            "只输出 Markdown 格式的自然语言回答。"
+        rewriter_prompt = config.prompts["query_rewrite"]["system"]
+        rewrite_result = await chat(
+            system_prompt=rewriter_prompt,
+            user_message=f"用户原始问题：{question}",
+            temperature=0.3,
         )
+        parsed = _parse_rewrite_result(rewrite_result)
+        if parsed["need_rewrite"]:
+            queries = parsed["queries"][:2]
+            # 原始问题 + 改写（去重）
+            search_queries = [question] + [q for q in queries if q != question]
+            logger.info("query_rewrite: need_rewrite=True, queries=%s", search_queries)
+        else:
+            logger.info("query_rewrite: need_rewrite=False, using original query")
+    except Exception:
+        logger.warning("query_rewrite failed, fallback to original query", exc_info=True)
+
+    # === Step 2: 直接搜索（每个 query 各搜一次） ===
+    all_sources = {}
+    combined_context_parts = []
+
+    for i, query in enumerate(search_queries):
+        # 通知前端正在搜索
+        yield _sse_event("tool_call", {
+            "name": "search_knowledge_base",
+            "args": {"query": query[:50]},
+            "result": f"正在搜索 ({i+1}/{len(search_queries)})",
+        })
+
+        result_text = await _exec_search_knowledge_base(query, user_id)
+        if not result_text or result_text.startswith("搜索结果为空"):
+            continue
+
+        # 提取来源信息
+        new_sources = _extract_sources_from_result(result_text)
+        for s in new_sources:
+            key = f"{s['doc_name']}_{s['page']}"
+            if key not in all_sources or s["score"] > all_sources[key]["score"]:
+                all_sources[key] = s
+
+        combined_context_parts.append(result_text)
+
+    if not all_sources:
+        yield _sse_event("answer",
+            "抱歉，在知识库中没有找到与您问题相关的资料。请尝试换个方式提问，或上传相关文档。")
+        return
+
+    # 去重 + 排序 + top 5
+    sources_list = sorted(all_sources.values(), key=lambda x: x["score"], reverse=True)[:5]
+
+    # === Step 3: 流式生成答案 ===
+    context = "\n\n".join(combined_context_parts)
+
+    answer_prompt = config.prompts["answer_generate"]["system"].format(context=context)
+
+    # 用带上下文的 user message 替换原问题
+    messages[-1] = {
+        "role": "user",
+        "content": f"参考资料：\n{context}\n\n用户问题：{question}",
+    }
+
+    full_answer = ""
+    try:
         async for chunk in chat_stream_with_history(
             messages=messages,
-            system_prompt=forced_system,
+            system_prompt=answer_prompt,
             temperature=0.3,
         ):
+            full_answer += chunk
             yield _sse_event("answer", chunk)
     except Exception as e:
-        logger.error("Agent loop final answer failed: %s", e)
-        yield _sse_event("answer", "（LLM 服务暂不可用）")
+        logger.error("Agent final answer stream failed: %s", e)
+        yield _sse_event("answer", "（生成答案时出错）")
+        return
+
+    # 答案输出完后再发 sources（如果 LLM 说未找到，就不展示来源）
+    not_found_keywords = ["未找到", "没有找到", "暂无", "没有相关", "未发现", "不存在对应内容"]
+    is_not_found = any(kw in full_answer for kw in not_found_keywords)
+    if sources_list and not is_not_found:
+        yield _sse_event("sources", sources_list)
 
 
 # ---------- SSE 工具函数 ----------
@@ -469,6 +436,12 @@ def _sanitize_answer(text: str) -> str:
     """清理 LLM 输出中的 HTML 标签、Anthropic XML、tool_call 残留和内联来源引用"""
     # 移除完整的 tool_call block
     text = re.sub(r"<function=[^>]*>.*?</parameter>", "", text, flags=re.DOTALL | re.IGNORECASE)
+
+    # cleanup XML tags
+    text = re.sub(r'</?function[^>]*>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'</?parameter[^>]*>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'</?tool_call[^>]*>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'</?parameters[^>]*>', '', text, flags=re.IGNORECASE)
 
     # 移除 Anthropic XML 标签（antml:parameter、antml:tool_result 等）
     text = re.sub(r'</?antml:[^>]*>', '', text, flags=re.IGNORECASE)

@@ -10,12 +10,12 @@
 
 ## 功能特性
 
-- 📄 **多格式文档解析** — 支持 PDF、Word、PPT、Markdown、TXT，扫描件自动 OCR
+- 📄 **多格式文档解析** — 支持 PDF、Word、PPT、Markdown、TXT、扫描件自动 OCR
 - 🧠 **语义切分** — 基于段落边界的智能切分，保留文档结构
-- 🔍 **Agent Loop 检索** — LLM 自主决策搜索策略，多轮检索后生成答案
+- 🔍 **Query Rewrite + 确定性检索** — LLM 先判断问题复杂度，决定是否改写查询词，再用确定 query 去检索
 - 🎯 **Reranker 精排** — BGE-reranker-v2-m3 cross-encoder 二次排序
 - 💬 **多会话管理** — 创建/切换/删除对话，历史记录持久化
-- 📡 **SSE 流式输出** — 实时流式返回答案，支持停止生成
+- 📡 **SSE 流式输出** — 实时流式返回答案，前端实时展示搜索状态
 - 📊 **检索评估体系** — Recall@k、MRR 指标，支持对比实验
 
 ## 技术栈
@@ -69,7 +69,7 @@ Enterprise_qa_system/
 │   ├── app/
 │   │   ├── main.py              # FastAPI 入口，lifespan 初始化
 │   │   ├── api/
-│   │   │   ├── qa.py            # 问答接口（Agent Loop + SSE 流式输出）
+│   │   │   ├── qa.py            # 问答接口（Query Rewrite + 检索 + SSE 流式输出）
 │   │   │   ├── auth.py          # 注册/登录/JWT
 │   │   │   ├── documents.py     # 文档上传/删除/列表
 │   │   │   ├── sessions.py      # 会话 CRUD
@@ -79,6 +79,7 @@ Enterprise_qa_system/
 │   │   │   ├── ingest.py        # 入库管线（解析→切分→Embedding→Milvus）
 │   │   │   ├── chunker.py       # 语义切分
 │   │   │   ├── reranker.py      # BGE-reranker 精排
+│   │   │   ├── query.py         # 查询管线（非 Agent 路径，含 query_rewrite）
 │   │   │   ├── ocr.py           # 扫描件 OCR（Tesseract/PaddleOCR）
 │   │   │   └── parser/          # 文档解析（PDF/Word/PPT/Text）
 │   │   ├── models/              # SQLAlchemy 数据模型
@@ -97,6 +98,8 @@ Enterprise_qa_system/
 │   ├── config/
 │   │   ├── pipeline.yml         # 切分/检索/Milvus 参数配置
 │   │   └── prompts.yml          # 提示词模板
+│   ├── scripts/
+│   │   └── reingest.py          # 重新入库脚本
 │   ├── eval/                    # 检索质量评估（Recall@k, MRR）
 │   ├── tests/                   # 单元测试
 │   ├── uploads/                 # 上传文件存储（运行时数据，不入 Git）
@@ -118,22 +121,25 @@ Enterprise_qa_system/
 
 ## 架构设计
 
-### 查询流程（Agent Loop）
+### 查询流程（Query Rewrite + 确定性检索）
 
 ```
 用户提问
   ↓
-Agent Loop（LLM 自主决策，最多 4 轮）
-  ├─ search_knowledge_base — 向量检索（默认）
-  ├─ search_by_filename    — 按文件名精确读取
-  └─ list_documents        — 列出所有文档
+Step 1: Query 改写判断（LLM，不带工具）
+  ├─ 问题具体、明确 → 不改写，只用原始完整问题
+  └─ 问题模糊、宽泛 → 改写为 3 条 query（原始 + 2 条改写）
   ↓
-search_knowledge_base 流程：
-  Embedding → Milvus HNSW 粗排 Top 20 → 阈值过滤(≥0.3) → Reranker 精排 Top 5
+Step 2: 确定性检索（每条 query 独立搜索）
+  每条 query → Embedding → Milvus HNSW 粗排 Top 20
+    → 阈值过滤（≥0.3）→ Reranker 精排 Top 5
   ↓
-LLM 基于检索结果生成答案（SSE 流式输出）
+Step 3: 合并去重（按 doc+页码）→ 分数排序取 Top 5
   ↓
-前端展示答案 + 来源卡片（含相似度分数）
+Step 4: LLM 基于检索结果生成答案（SSE 流式输出）
+  ↓
+前端展示答案 + 真实来源卡片
+（如果 LLM 回答"未找到相关资料"，则不展示来源卡片）
 ```
 
 ### 入库流程
@@ -150,6 +156,16 @@ Embedding（千问 text-embedding-v4，1024 维）
 批量写入 Milvus（HNSW 索引，COSINE 相似度）
   ↓
 更新 PostgreSQL 文档状态
+```
+
+### SSE 事件流
+
+```
+event: tool_call     → "正在分析问题"
+event: tool_call     → "正在搜索 (1/N)"（每调一次搜索发一次）
+event: answer        → 流式 LLM 输出文本（逐 chunk）
+event: sources       → 参考来源卡片（JSON）
+event: done          → 完成，包含 session_id
 ```
 
 ### 核心配置
@@ -217,6 +233,11 @@ reranker:
   enabled: false    # 关闭后跳过精排，响应更快
 ```
 
+
+### 调整 Query Rewrite 策略
+
+编辑 `backend/config/prompts.yml`，修改 `query_rewrite` 部分的判断标准和示例，即可控制哪些问题触发改写。
+
 ## 效果图:
 
 <img width="1910" height="915" alt="image" src="https://github.com/user-attachments/assets/73a66220-f730-4beb-b7ee-a3b1ee82eacc" />
@@ -228,4 +249,6 @@ reranker:
 <img width="1910" height="915" alt="image" src="https://github.com/user-attachments/assets/5a8ea5c2-fdfa-40cc-b39d-ee333439c2e6" />
 
 <img width="1910" height="915" alt="image" src="https://github.com/user-attachments/assets/033a9f7c-abb4-40a1-8eab-28efc1e1b9cc" />
+
+## License
 

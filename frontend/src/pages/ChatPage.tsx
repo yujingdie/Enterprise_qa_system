@@ -56,6 +56,7 @@ function startStream(
         search_knowledge_base: '正在搜索知识库',
         search_by_filename: '正在读取文件内容',
         list_documents: '正在查看文档列表',
+        analyze_question: '正在分析问题',
       }
       globalToolStatus = toolNames[data.name] || `正在调用 ${data.name}`
       notifyListeners()
