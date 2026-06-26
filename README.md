@@ -35,8 +35,8 @@
 ### 环境要求
 
 - Docker & Docker Compose
--  LLM 模型 API Key（用于答案生成和查询改写）
--  Embedding 模型 API Key（用于文本向量化）
+- LLM 模型 API Key（用于答案生成和查询改写）
+- Embedding 模型 API Key（用于文本向量化）
 
 ### 启动
 
@@ -69,16 +69,28 @@ Enterprise_qa_system/
 │   ├── app/
 │   │   ├── main.py              # FastAPI 入口，lifespan 初始化
 │   │   ├── api/
-│   │   │   ├── qa.py            # 问答接口（Agent Loop + SSE）
+│   │   │   ├── qa.py            # 问答接口（Agent Loop + SSE 流式输出）
 │   │   │   ├── auth.py          # 注册/登录/JWT
 │   │   │   ├── documents.py     # 文档上传/删除/列表
-│   │   │   └── history.py       # 会话历史
+│   │   │   ├── sessions.py      # 会话 CRUD
+│   │   │   ├── history.py       # 历史记录查询
+│   │   │   └── deps.py          # 依赖注入（JWT 认证、数据库连接）
 │   │   ├── pipeline/
-│   │   │   ├── query.py         # 查询管线（retrieval）
-│   │   │   ├── ingest.py        # 入库管线
+│   │   │   ├── ingest.py        # 入库管线（解析→切分→Embedding→Milvus）
 │   │   │   ├── chunker.py       # 语义切分
 │   │   │   ├── reranker.py      # BGE-reranker 精排
+│   │   │   ├── ocr.py           # 扫描件 OCR（Tesseract/PaddleOCR）
 │   │   │   └── parser/          # 文档解析（PDF/Word/PPT/Text）
+│   │   ├── models/              # SQLAlchemy 数据模型
+│   │   │   ├── user.py          # 用户表
+│   │   │   ├── session.py       # 会话表
+│   │   │   ├── conversation.py  # 对话记录表
+│   │   │   └── document.py      # 文档元数据表
+│   │   ├── schemas/             # Pydantic 请求/响应模型
+│   │   ├── core/
+│   │   │   ├── config.py        # 配置加载（.env + YAML）
+│   │   │   ├── database.py      # SQLAlchemy 引擎
+│   │   │   └── security.py      # 密码哈希 + JWT
 │   │   ├── milvus/              # 向量库操作（schema/index/searcher/writer）
 │   │   ├── llm/client.py        # LLM 调用（Anthropic SDK）
 │   │   └── embed/client.py      # Embedding（千问 API / 本地 BGE）
@@ -86,29 +98,38 @@ Enterprise_qa_system/
 │   │   ├── pipeline.yml         # 切分/检索/Milvus 参数配置
 │   │   └── prompts.yml          # 提示词模板
 │   ├── eval/                    # 检索质量评估（Recall@k, MRR）
-│   └── tests/                   # 单元测试
+│   ├── tests/                   # 单元测试
+│   ├── uploads/                 # 上传文件存储（运行时数据，不入 Git）
+│   ├── Dockerfile
+│   ├── .dockerignore
+│   ├── requirements.txt
+│   └── .env.example             # 环境变量模板
 ├── frontend/
 │   ├── src/
-│   │   ├── pages/               # 页面组件
+│   │   ├── pages/               # 页面组件（Chat/Documents/Login/Register）
 │   │   ├── components/          # UI 组件
 │   │   ├── api/                 # API 客户端 + SSE 流式处理
 │   │   └── types/               # TypeScript 类型定义
+│   ├── Dockerfile
 │   └── nginx.conf               # 反向代理配置
-├── docker-compose.yml           # 6 个容器编排
-└── .env.example                 # 环境变量模板
+├── docker-compose.yml           # 6 个容器编排（postgres/etcd/minio/milvus/backend/frontend）
+└── .gitignore
 ```
 
 ## 架构设计
 
-### 查询流程
+### 查询流程（Agent Loop）
 
 ```
 用户提问
   ↓
 Agent Loop（LLM 自主决策，最多 4 轮）
+  ├─ search_knowledge_base — 向量检索（默认）
+  ├─ search_by_filename    — 按文件名精确读取
+  └─ list_documents        — 列出所有文档
   ↓
-search_knowledge_base（向量检索）
-  ↓  Embedding → Milvus HNSW 粗排 Top 20 → 阈值过滤 → Reranker 精排 Top 5
+search_knowledge_base 流程：
+  Embedding → Milvus HNSW 粗排 Top 20 → 阈值过滤(≥0.3) → Reranker 精排 Top 5
   ↓
 LLM 基于检索结果生成答案（SSE 流式输出）
   ↓
@@ -120,7 +141,7 @@ LLM 基于检索结果生成答案（SSE 流式输出）
 ```
 上传文档
   ↓
-解析（PDF/Word/PPT/Text）
+解析（PDF/Word/PPT/Text，扫描件自动 OCR）
   ↓
 语义切分（按段落边界，目标 512 字）
   ↓
@@ -146,14 +167,15 @@ Embedding（千问 text-embedding-v4，1024 维）
 ## 评估体系
 
 ```bash
-# 默认评估
-docker-compose exec backend python -m eval.run_eval
+# 默认评估（本地运行，需 Milvus 已启动）
+cd backend
+python -m eval.run_eval
 
 # 对比实验
-docker-compose exec backend python -m eval.run_eval --experiment rerank    # Rerank 开关
-docker-compose exec backend python -m eval.run_eval --experiment search    # Dense vs Hybrid
-docker-compose exec backend python -m eval.run_eval --experiment chunk     # 切分策略
-docker-compose exec backend python -m eval.run_eval --experiment all       # 全部实验
+python -m eval.run_eval --experiment rerank    # Rerank 开关
+python -m eval.run_eval --experiment search    # Dense vs Hybrid
+python -m eval.run_eval --experiment chunk     # 切分策略对比
+python -m eval.run_eval --experiment all       # 全部实验
 ```
 
 评估指标：Recall@1、Recall@3、Recall@5、MRR
@@ -161,11 +183,13 @@ docker-compose exec backend python -m eval.run_eval --experiment all       # 全
 ## 测试
 
 ```bash
+cd backend
 # 运行全部测试
-docker-compose exec backend python -m pytest tests/ -v
+pytest tests/ -v
 
 # 单个测试
-docker-compose exec backend python -m pytest tests/test_chunker.py -v
+pytest tests/test_chunker.py -v
+pytest tests/test_parser.py::test_parse_txt -v
 ```
 
 ## 配置说明
