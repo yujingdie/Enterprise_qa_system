@@ -217,6 +217,15 @@ reranker:
   enabled: false    # 关闭后跳过精排，响应更快
 ```
 
-## License
+## 效果图:
 
-MIT
+<img width="1910" height="915" alt="image" src="https://github.com/user-attachments/assets/73a66220-f730-4beb-b7ee-a3b1ee82eacc" />
+
+<img width="1910" height="915" alt="011601c098b70440eaa4eb5cb1114ae8" src="https://github.com/user-attachments/assets/58c741d7-4546-4c4f-8c45-8d4ba6ea56a3" />
+
+<img width="1910" height="915" alt="8ca12ee70cfdf18ddb6da5c111e7d16e" src="https://github.com/user-attachments/assets/48bfbbde-e837-4cc5-9794-b1a35260a2c5" />
+
+<img width="1910" height="915" alt="image" src="https://github.com/user-attachments/assets/5a8ea5c2-fdfa-40cc-b39d-ee333439c2e6" />
+
+<img width="1910" height="915" alt="image" src="https://github.com/user-attachments/assets/033a9f7c-abb4-40a1-8eab-28efc1e1b9cc" />
+
