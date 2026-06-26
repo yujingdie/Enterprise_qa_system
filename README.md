@@ -92,7 +92,7 @@ Enterprise_qa_system/
 │   │   │   ├── config.py        # 配置加载（.env + YAML）
 │   │   │   ├── database.py      # SQLAlchemy 引擎
 │   │   │   └── security.py      # 密码哈希 + JWT
-│   │   ├── milvus/              # 向量库操作（schema/index/searcher/writer）
+│   │   ├── milvus/              # 向量库操作（client/schema/index/searcher/writer）
 │   │   ├── llm/client.py        # LLM 调用（Anthropic SDK）
 │   │   └── embed/client.py      # Embedding（千问 API / 本地 BGE）
 │   ├── config/
@@ -101,7 +101,12 @@ Enterprise_qa_system/
 │   ├── scripts/
 │   │   └── reingest.py          # 重新入库脚本
 │   ├── eval/                    # 检索质量评估（Recall@k, MRR）
+│   │   └── run_eval.py
 │   ├── tests/                   # 单元测试
+│   │   ├── test_chunker.py
+│   │   ├── test_embedder.py
+│   │   ├── test_milvus_searcher.py
+│   │   └── test_parser.py
 │   ├── uploads/                 # 上传文件存储（运行时数据，不入 Git）
 │   ├── Dockerfile
 │   ├── .dockerignore
