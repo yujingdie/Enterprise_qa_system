@@ -90,8 +90,9 @@ AGENT_SYSTEM_PROMPT = """\
 - 当用户要求"列出所有文档"时，用 list_documents
 - 对 search_knowledge_base 的调用策略：简单明确的问题直接调用一次；复杂或模糊的问题，从两个不同角度改写成新的查询词，加上原文一共调用3次（原文+改写1+改写2）
 - 如果工具返回"搜索结果为空"或参考资料与问题无关，直接回复"知识库不存在对应内容，请上传相关文件"，不要列举文档类型或给建议
-- 绝对不要在回答文本中输出 tool_call、function_call、<parameter> 等工具调用格式的文本，只输出自然语言回答
-- 不要在回答文本中输出"来源：xxx"、"《xxx》第X页"、"（参考：xxx）"等来源引用信息，系统会在回答下方自动以卡片形式展示参考来源及相似度分数
+- 当你已经通过工具获取了足够的信息时，必须立即停止调用工具，直接用自然语言总结回答。每个问题最多调用1-2次工具即可。
+- 绝对不要在回答中输出 tool_call、function_call、<tool_call>、<function>、<parameter> 等任何XML或工具调用格式的文本，只输出自然语言回答
+- 不要在回答中输出"来源：xxx"、"《xxx》第X页"、"（参考：xxx）"等来源引用信息，系统会在回答下方自动以卡片形式展示参考来源及相似度分数
 - 回答使用 Markdown 格式，禁止输出 HTML 标签
 - 回答简洁清晰
 """
@@ -110,8 +111,8 @@ async def _exec_search_knowledge_base(query: str, user_id: str) -> str:
 
         collection = get_collection()
         top_k = config.pipeline["retrieval"]["top_k"]
-        threshold = _config.pipeline["retrieval"]["score_threshold"]
-        rerank_top_k = _config.pipeline["retrieval"]["rerank_top_k"]
+        threshold = config.pipeline["retrieval"]["score_threshold"]
+        rerank_top_k = config.pipeline["retrieval"]["rerank_top_k"]
 
         # Embedding
         query_vector = await embed([query])
@@ -255,6 +256,49 @@ async def _execute_tool(name: str, args: dict, user_id: str, question: str = "")
         return f"未知工具：{name}"
 
 
+# ---------- 文本 tool_call 解析（MiMo 等模型会把 tool_call 写成纯文本） ----------
+
+# 匹配 <tool_call>...</tool_call> 或 <function=name>...</function> 格式
+_XML_TC_RE = re.compile(
+    r"<tool_call>\s*"
+    r"<name>(.*?)</name>\s*"
+    r"<parameters>(.*?)</parameters>\s*"
+    r"</tool_call>",
+    re.DOTALL,
+)
+_FUNC_RE = re.compile(
+    r"<function=(\w+)>(.*?)</function>",
+    re.DOTALL,
+)
+_PARAM_RE = re.compile(r"<(\w+)>(.*?)</\1>", re.DOTALL)
+
+_VALID_TOOL_NAMES = {t["name"] for t in TOOLS}
+
+
+def _parse_text_tool_calls(text: str) -> list[dict] | None:
+    """尝试从纯文本中提取 MiMo 等模型写出的 XML 格式 tool_call。"""
+    calls = []
+
+    for m in _XML_TC_RE.finditer(text):
+        name = m.group(1).strip()
+        params_xml = m.group(2)
+        if name not in _VALID_TOOL_NAMES:
+            continue
+        args = {p.group(1): p.group(2).strip() for p in _PARAM_RE.finditer(params_xml)}
+        calls.append({"name": name, "args": args})
+
+    if not calls:
+        for m in _FUNC_RE.finditer(text):
+            name = m.group(1).strip()
+            params_xml = m.group(2)
+            if name not in _VALID_TOOL_NAMES:
+                continue
+            args = {p.group(1): p.group(2).strip() for p in _PARAM_RE.finditer(params_xml)}
+            calls.append({"name": name, "args": args})
+
+    return calls if calls else None
+
+
 # ---------- Agent Loop ----------
 
 async def _agent_loop_to_queue(question: str, user_id: str, history: list[dict] | None = None,
@@ -326,7 +370,7 @@ async def _agent_loop(question: str, user_id: str, history: list[dict] | None = 
                     "content": result_text,
                 })
 
-                # 收集来源信息（多次搜索的结果合并，不覆盖）
+                # 收集来源信息（按 doc+页码去重，分数排序，只留 top 5）
                 if tool_name in ("search_knowledge_base", "search_by_filename"):
                     new_sources = _extract_sources_from_result(result_text)
                     existing = {f"{s['doc_name']}_{s['page']}": s for s in all_sources}
@@ -334,14 +378,46 @@ async def _agent_loop(question: str, user_id: str, history: list[dict] | None = 
                         key = f"{s['doc_name']}_{s['page']}"
                         if key not in existing or s["score"] > existing[key]["score"]:
                             existing[key] = s
-                    all_sources = list(existing.values())
+                    all_sources = sorted(existing.values(), key=lambda x: x["score"], reverse=True)[:5]
 
             # 把工具结果加入 messages，进入下一轮
             messages.append({"role": "user", "content": tool_results})
         else:
+            preview_text = text_blocks[0].text if text_blocks else ""
+
+            # 检测模型是否把 tool_call 写成了纯文本（MiMo 等模型常见）
+            text_tool_calls = _parse_text_tool_calls(preview_text)
+            if text_tool_calls:
+                logger.info("Agent round %d: detected text-based tool calls: %s",
+                            round_idx + 1, [c["name"] for c in text_tool_calls])
+                messages.append({"role": "assistant", "content": preview_text})
+                tool_results = []
+                for tc in text_tool_calls:
+                    tool_name = tc["name"]
+                    tool_args = tc["args"]
+                    logger.info("Agent round %d (text-based): tool=%s args=%s",
+                                round_idx + 1, tool_name, tool_args)
+                    yield _sse_event("tool_call", {
+                        "name": tool_name, "args": tool_args, "round": round_idx + 1,
+                    })
+                    result_text = await _execute_tool(tool_name, tool_args, user_id, question)
+                    tool_results.append({
+                        "type": "tool_result", "tool_use_id": f"text_tc_{round_idx}",
+                        "content": result_text,
+                    })
+                    if tool_name in ("search_knowledge_base", "search_by_filename"):
+                        new_sources = _extract_sources_from_result(result_text)
+                        existing = {f"{s['doc_name']}_{s['page']}": s for s in all_sources}
+                        for s in new_sources:
+                            key = f"{s['doc_name']}_{s['page']}"
+                            if key not in existing or s["score"] > existing[key]["score"]:
+                                existing[key] = s
+                        all_sources = sorted(existing.values(), key=lambda x: x["score"], reverse=True)[:5]
+                messages.append({"role": "user", "content": tool_results})
+                continue  # 不输出 XML，继续下一轮
+
             # 没有工具调用，LLM 给出了最终答案 → 流式输出
             not_found_keywords = ["未找到", "没有找到", "暂无", "没有相关", "未发现", "不存在对应内容"]
-            preview_text = text_blocks[0].text if text_blocks else ""
             is_not_found = any(kw in preview_text for kw in not_found_keywords)
 
             if all_sources and not is_not_found:
@@ -390,14 +466,18 @@ def _sse_event(event: str, data) -> str:
 
 
 def _sanitize_answer(text: str) -> str:
-    """清理 LLM 输出中的 HTML 标签、Anthropic XML 和内联来源引用"""
+    """清理 LLM 输出中的 HTML 标签、Anthropic XML、tool_call 残留和内联来源引用"""
+    # 移除完整的 tool_call block
+    text = re.sub(r"<function=[^>]*>.*?</parameter>", "", text, flags=re.DOTALL | re.IGNORECASE)
+
     # 移除 Anthropic XML 标签（antml:parameter、antml:tool_result 等）
     text = re.sub(r'</?antml:[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'</?function[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'</?invoke[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'</?tool_result[^>]*>', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'<parameter>', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'</parameter>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'</?tool_call[^>]*>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'</?parameters[^>]*>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'</?parameter[^>]*>', '', text, flags=re.IGNORECASE)
 
     # 移除常见 HTML 标签但保留内容
     text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
@@ -533,15 +613,7 @@ async def ask(
                 if disconnected:
                     break
 
-                try:
-                    yield event_str
-                except (ConnectionResetError, BrokenPipeError, GeneratorExit):
-                    logger.info("Client disconnected, stopping stream")
-                    disconnected = True
-                    agent_task.cancel()
-                    break
-
-                # 解析事件
+                # 对 answer 事件做清理，过滤 tool_call XML 等乱七八糟的内容
                 lines = event_str.strip().split("\n")
                 evt_type = ""
                 evt_data = ""
@@ -556,8 +628,21 @@ async def ask(
                         chunk = json.loads(evt_data)
                     except (json.JSONDecodeError, TypeError):
                         chunk = evt_data
-                    full_answer += chunk
-                elif evt_type == "sources":
+                    clean_chunk = _sanitize_answer(chunk)
+                    if not clean_chunk:
+                        continue  # chunk 全是 XML，跳过
+                    full_answer += clean_chunk
+                    event_str = _sse_event("answer", clean_chunk)
+
+                try:
+                    yield event_str
+                except (ConnectionResetError, BrokenPipeError, GeneratorExit):
+                    logger.info("Client disconnected, stopping stream")
+                    disconnected = True
+                    agent_task.cancel()
+                    break
+
+                if evt_type == "sources":
                     try:
                         sources_data = json.loads(evt_data)
                     except (json.JSONDecodeError, TypeError):

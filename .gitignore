@@ -10,11 +10,20 @@ build/
 .venv/
 venv/
 
-# 上传文件
-backend/uploads/
+# 上传文件（保留空目录结构）
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# 临时脚本
+backend/reingest.py
+backend/fix_tool_call.py
+backend/test_sanitize.py
 
 # Reranker 模型（太大，不入仓库）
 backend/reranker_model/
+
+# Claude Code
+.claude/
 
 # IDE
 .idea/

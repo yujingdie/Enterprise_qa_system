@@ -1,0 +1,6 @@
+reranker_model/
+uploads/
+__pycache__/
+*.pyc
+.env
+.git/

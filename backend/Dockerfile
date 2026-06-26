@@ -21,6 +21,7 @@ RUN sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sourc
     tesseract-ocr-chi-sim \
     tesseract-ocr-chi-tra \
     antiword \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # 清华 PyPI 镜像

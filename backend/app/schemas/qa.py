@@ -8,3 +8,11 @@ class SourceInfo(BaseModel):
     page: int = Field(..., description="页码")
     score: float = Field(..., description="相关度分数")
     chunk_text: str = Field(..., description="原文片段")
+
+
+class HistoryItem(BaseModel):
+    id: str = Field(..., description="记录ID")
+    question: str = Field(..., description="用户问题")
+    answer: str = Field(..., description="回答内容")
+    sources: list[SourceInfo] = Field(default_factory=list, description="引用来源")
+    created_at: str = Field(..., description="创建时间")
