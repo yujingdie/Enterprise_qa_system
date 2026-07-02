@@ -25,7 +25,8 @@ retrieval:
   top_k: 20                    # Milvus 粗排取多少条
   rerank_top_k: 5              # Rerank 精排后取多少条
   use_sparse: true             # 是否启用稀疏向量混合检索
-  score_threshold: 0.3         # 最低相关度阈值
+  score_threshold: 0.3         # 粗排阈值（Milvus COSINE 分数）
+  rerank_score_threshold: 0.5  # 精排阈值（Reranker sigmoid 归一化后分数）
 
 # ============ 重排序配置 ============
 reranker:

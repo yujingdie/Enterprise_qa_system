@@ -112,6 +112,7 @@ async def _exec_search_knowledge_base(query: str, user_id: str) -> str:
         collection = get_collection()
         top_k = config.pipeline["retrieval"]["top_k"]
         threshold = config.pipeline["retrieval"]["score_threshold"]
+        rerank_threshold = config.pipeline["retrieval"]["rerank_score_threshold"]
         rerank_top_k = config.pipeline["retrieval"]["rerank_top_k"]
 
         # Embedding
@@ -123,11 +124,11 @@ async def _exec_search_knowledge_base(query: str, user_id: str) -> str:
                      query[:30], len(results),
                      [round(r["score"], 4) for r in results[:5]])
 
-        # 阈值过滤
+        # 粗排阈值过滤
         before = len(results)
         results = [r for r in results if r["score"] >= threshold]
-        logger.info("search[%s]: after_threshold=%d/%d",
-                     query[:30], len(results), before)
+        logger.info("search[%s]: after_dense_threshold=%.2f %d/%d",
+                     query[:30], threshold, len(results), before)
 
         if not results:
             return "搜索结果为空，未找到相关内容。"
@@ -137,6 +138,15 @@ async def _exec_search_knowledge_base(query: str, user_id: str) -> str:
             results = rerank(query, results, top_k=rerank_top_k)
         except Exception:
             results = sorted(results, key=lambda x: x["score"], reverse=True)[:rerank_top_k]
+
+        # 精排阈值过滤
+        before = len(results)
+        results = [r for r in results if r["score"] >= rerank_threshold]
+        logger.info("search[%s]: after_rerank_threshold=%.2f %d/%d",
+                     query[:30], rerank_threshold, len(results), before)
+
+        if not results:
+            return "搜索结果为空，未找到相关内容。"
 
         parts = []
         for i, r in enumerate(results, 1):

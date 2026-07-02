@@ -44,7 +44,16 @@ async def chat(
         temperature=temperature,
         max_tokens=2048,
     )
-    result = response.content[0].text
+    # 兼容 ThinkingBlock（DeepSeek 等模型可能先返回推理过程再返回文本）
+    result = ""
+    for block in response.content:
+        block_type = getattr(block, "type", None)
+        if block_type == "text":
+            result = getattr(block, "text", "")
+            break
+    if not result:
+        # 兜底：取最后一个有 input_text 的 block（tool_use 场景）
+        result = response.content[-1].input_text if hasattr(response.content[-1], "input_text") else ""
     logger.info("LLM chat done: result_len=%d", len(result))
     return result
 

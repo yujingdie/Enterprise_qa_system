@@ -87,7 +87,17 @@ async def run_retrieval(question: str, user_id: str = None) -> dict:
     )[:config.pipeline["retrieval"]["top_k"]]
     logger.info("retrieval: %d candidates in %.2fs", len(candidates), time.time() - t1)
 
-    # === 步骤 3: 重排序 ===
+    # === 步骤 3a: 粗排阈值过滤（Milvus COSINE 分数） ===
+    dense_threshold = config.pipeline["retrieval"]["score_threshold"]
+    before = len(candidates)
+    candidates = [c for c in candidates if c["score"] >= dense_threshold]
+    logger.info("after_dense_threshold=%.2f: %d/%d candidates",
+                dense_threshold, len(candidates), before)
+
+    if not candidates:
+        logger.info("no candidates after dense threshold")
+
+    # === 步骤 3b: 重排序 ===
     if config.pipeline["reranker"]["enabled"] and len(candidates) > 1:
         t2 = time.time()
         try:
@@ -98,12 +108,15 @@ async def run_retrieval(question: str, user_id: str = None) -> dict:
             candidates = candidates[:config.pipeline["retrieval"]["rerank_top_k"]]
             logger.warning("rerank failed, fallback to score sort", exc_info=True)
 
-    # 过滤低分结果
-    threshold = config.pipeline["retrieval"]["score_threshold"]
-    logger.info("threshold=%.2f, pre-filter scores: %s",
-                threshold,
-                [(c["source"][:30], round(c["score"], 4)) for c in candidates])
-    candidates = [c for c in candidates if c["score"] >= threshold]
+    # === 步骤 3c: 精排阈值过滤（Reranker sigmoid 归一化后分数） ===
+    rerank_threshold = config.pipeline["retrieval"]["rerank_score_threshold"]
+    before = len(candidates)
+    candidates = [c for c in candidates if c["score"] >= rerank_threshold]
+    logger.info("after_rerank_threshold=%.2f: %d/%d candidates",
+                rerank_threshold, len(candidates), before)
+
+    if not candidates:
+        logger.info("no candidates after rerank threshold")
 
     # 构建来源和上下文
     sources = [

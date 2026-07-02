@@ -137,7 +137,7 @@ Step 1: Query 改写判断（LLM，不带工具）
   ↓
 Step 2: 确定性检索（每条 query 独立搜索）
   每条 query → Embedding → Milvus HNSW 粗排 Top 20
-    → 阈值过滤（≥0.3）→ Reranker 精排 Top 5
+    → 粗筛（COSINE ≥0.3）→ Reranker 精排 Top 5 → 精筛（sigmoid ≥0.5）
   ↓
 Step 3: 合并去重（按 doc+页码）→ 分数排序取 Top 5
   ↓
@@ -183,7 +183,8 @@ event: done          → 完成，包含 session_id
 | 索引类型 | HNSW | M=16, ef_construction=256 |
 | 粗排 Top K | 20 | Milvus 返回的候选数 |
 | 精排 Top K | 5 | Reranker 后的最终结果数 |
-| 相似度阈值 | 0.3 | 低于此分数的结果被过滤 |
+| 粗排阈值 | 0.3 | Milvus COSINE 分数门槛 |
+| 精排阈值 | 0.5 | Reranker sigmoid 归一化后分数门槛 |
 
 ## 评估体系
 
