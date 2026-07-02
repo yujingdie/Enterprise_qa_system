@@ -167,7 +167,3 @@ QIANWEN_API_KEY=your-key-here
 <img width="1910" height="915" alt="chat" src="https://github.com/user-attachments/assets/a182deca-524e-4910-afc8-a3dfa543facc" />
 <img width="1910" height="915" alt="chat" src="https://github.com/user-attachments/assets/49961ee3-d8ee-450d-9e0e-79941ce7ee88" />
 <img width="1910" height="915" alt="chat" src="https://github.com/user-attachments/assets/a8326dc0-8aed-425d-864e-4564457c6a47" />
-
-## 协议
-
-MIT
