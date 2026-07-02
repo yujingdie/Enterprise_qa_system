@@ -21,14 +21,13 @@ from sqlalchemy.orm import Session as DBSession
 from app.api.deps import get_current_user, get_db
 from app.core.config import config
 from app.core.database import SessionLocal
-from app.llm.client import chat, chat_stream_with_history
+from app.llm.client import chat_with_tools, chat_stream_with_history
 from app.milvus.schema import get_collection
 from app.milvus.searcher import search_dense
 from app.models.conversation import Conversation
 from app.models.document import Document
 from app.models.session import Session
 from app.embed.client import embed
-from app.pipeline.query import _parse_rewrite_result
 
 logger = logging.getLogger(__name__)
 
@@ -78,24 +77,34 @@ TOOLS = [
 ]
 
 AGENT_SYSTEM_PROMPT = """\
-你是一个专业的企业知识问答助手。你可以使用以下工具来查找信息：
+你是一个专业的企业知识问答助手。你可以使用 search_knowledge_base 工具来搜索知识库。
 
-1. search_knowledge_base — 语义搜索知识库（默认首选）
-2. search_by_filename — 根据文件名精确读取文档内容
-3. list_documents — 列出所有已上传的文档
+工作流程：
+1. 收到用户问题后，先判断问题是否模糊、宽泛或指代不明
+2. 如果问题模糊 → 改写成**2 个不同角度**的搜索词，然后**一次性调用 search_knowledge_base 3 次**（原问题 + 2 个改写词）
+3. 如果问题明确具体 → 调用 **search_knowledge_base 1 次**（用原问题即可）
+4. 查看所有搜索结果，然后基于搜索结果总结回答
+
+改写示例：
+- "作者的游戏经历" → 改写为 ["作者的游戏经历", "作者玩的游戏", "作者和游戏的故事"]
+- "那个软件架构的东西" → 改写为 ["软件架构", "系统架构设计", "架构方案"]
+- "原神好玩吗" → 不改写（问题明确，直接搜一次）
 
 核心规则：
-- 必须基于工具返回的真实资料回答，不能编造任何信息
-- 默认用 search_knowledge_base 搜索
-- 当用户明确提到文件名（如"claude.md"、"那个xx文件"）时，用 search_by_filename 精确读取
-- 当用户要求"列出所有文档"时，用 list_documents
-- 如果工具返回"搜索结果为空"或参考资料与问题无关，直接回复"知识库不存在对应内容，请上传相关文件"，不要列举文档类型或给建议
-- 当你已经通过工具获取了足够的信息时，必须立即停止调用工具，直接用自然语言总结回答。每个问题最多调用1-2次工具即可。
+- 必须基于工具返回的真实资料回答，不能编造数据
+- 如果工具返回"搜索结果为空"，直接回复"知识库不存在对应内容，请上传相关文件"
+- 如果搜索结果不够充分，可以换一批搜索词再次搜索
+- **允许在阈值达标的搜索资料基础上做合理推断**。如果搜索结果中包含相关介绍但无法直接回答用户的问题（如用户问"我最喜欢哪个"，你搜到了多个选项的介绍），可以基于真实文档内容进行推测。但必须明确区分"资料原文"和"你的推断"，用"可能"、"推测"等措辞，绝不能编造文档中不存在的数据。
+- 不确认的信息不要写死，要用"可能"、"推测"等措辞
+- 看到所有搜索结果后，用自然语言总结回答
 - 绝对不要在回答中输出 tool_call、function_call、<tool_call>、<function>、<parameter> 等任何XML或工具调用格式的文本，只输出自然语言回答
 - 不要在回答中输出"来源：xxx"、"《xxx》第X页"、"（参考：xxx）"等来源引用信息，系统会在回答下方自动以卡片形式展示参考来源及相似度分数
 - 回答使用 Markdown 格式，禁止输出 HTML 标签
 - 回答简洁清晰
-"""
+
+其他工具：
+- search_by_filename — 根据文件名精确读取文档内容（当用户明确提到文件名时使用）
+- list_documents — 列出所有已上传的文档（当用户询问"有哪些文档"时使用）"""
 
 
 # ---------- 工具执行 ----------
@@ -138,6 +147,9 @@ async def _exec_search_knowledge_base(query: str, user_id: str) -> str:
             results = rerank(query, results, top_k=rerank_top_k)
         except Exception:
             results = sorted(results, key=lambda x: x["score"], reverse=True)[:rerank_top_k]
+
+        logger.info("search[%s]: after_rerank scores=%s",
+                     query[:30], [round(r["score"], 4) for r in results])
 
         # 精排阈值过滤
         before = len(results)
@@ -272,50 +284,8 @@ async def _execute_tool(name: str, args: dict, user_id: str, question: str = "")
         return f"未知工具：{name}"
 
 
-# ---------- 文本 tool_call 解析（MiMo 等模型会把 tool_call 写成纯文本） ----------
-
-# 匹配 <tool_call>...</tool_call> 或 <function=name>...</function> 格式
-_XML_TC_RE = re.compile(
-    r"<tool_call>\s*"
-    r"<name>(.*?)</name>\s*"
-    r"<parameters>(.*?)</parameters>\s*"
-    r"</tool_call>",
-    re.DOTALL,
-)
-_FUNC_RE = re.compile(
-    r"<function=(\w+)>(.*?)</function>",
-    re.DOTALL,
-)
-_PARAM_RE = re.compile(r"<(\w+)>(.*?)</\1>", re.DOTALL)
-
-_VALID_TOOL_NAMES = {t["name"] for t in TOOLS}
-
-
-def _parse_text_tool_calls(text: str) -> list[dict] | None:
-    """尝试从纯文本中提取 MiMo 等模型写出的 XML 格式 tool_call。"""
-    calls = []
-
-    for m in _XML_TC_RE.finditer(text):
-        name = m.group(1).strip()
-        params_xml = m.group(2)
-        if name not in _VALID_TOOL_NAMES:
-            continue
-        args = {p.group(1): p.group(2).strip() for p in _PARAM_RE.finditer(params_xml)}
-        calls.append({"name": name, "args": args})
-
-    if not calls:
-        for m in _FUNC_RE.finditer(text):
-            name = m.group(1).strip()
-            params_xml = m.group(2)
-            if name not in _VALID_TOOL_NAMES:
-                continue
-            args = {p.group(1): p.group(2).strip() for p in _PARAM_RE.finditer(params_xml)}
-            calls.append({"name": name, "args": args})
-
-    return calls if calls else None
-
-
 # ---------- Agent Loop ----------
+
 
 async def _agent_loop_to_queue(question: str, user_id: str, history: list[dict] | None = None,
                                queue: asyncio.Queue | None = None):
@@ -331,107 +301,140 @@ async def _agent_loop_to_queue(question: str, user_id: str, history: list[dict] 
 
 async def _agent_loop(question: str, user_id: str, history: list[dict] | None = None):
     """
-    Agent Loop：
-    1. Query 改写判断（不带工具）→ 确定搜索策略
-    2. 直接搜索（不经过 LLM 工具调用）
-    3. 流式输出答案
+    LangChain Agent Loop（两阶段）：
+
+    Phase 1 — 工具决策：
+      LLM 通过 chat_with_tools() 自主判断是否需要改写搜索词。
+      - 模糊问题：一次性调 search_knowledge_base 3 次（原 query + 2 个改写词）
+      - 明确问题：调 1 次
+      看到所有搜索结果后决定是否还需更多，或给出文本回答。
+
+    Phase 2 — 流式答案输出：
+      将所有搜索结果拼入上下文，流式输出。
+
+    消息格式：OpenAI style（tool_calls + tool_result），由 client.py 统一转换。
     """
     messages = []
-    # 加入历史对话（最近 10 轮）
     if history:
         for turn in history[-10:]:
             messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": question})
 
-    # === Step 1: Query 改写判断（不带工具） ===
-    yield _sse_event("tool_call", {
-        "name": "analyze_question",
-        "args": {},
-        "result": "正在分析问题",
-    })
+    all_sources = {}
+    all_raw_results: list[str] = []
+    tool_round = 0
+    llm_raw_answer = ""
 
-    search_queries = [question]
-    try:
-        rewriter_prompt = config.prompts["query_rewrite"]["system"]
-        rewrite_result = await chat(
-            system_prompt=rewriter_prompt,
-            user_message=f"用户原始问题：{question}",
+    while tool_round < MAX_TOOL_ROUNDS:
+        tool_round += 1
+
+        response = await chat_with_tools(
+            messages=messages,
+            system_prompt=AGENT_SYSTEM_PROMPT,
+            tools=TOOLS,
             temperature=0.3,
         )
-        parsed = _parse_rewrite_result(rewrite_result)
-        if parsed["need_rewrite"]:
-            queries = parsed["queries"][:2]
-            # 原始问题 + 改写（去重）
-            search_queries = [question] + [q for q in queries if q != question]
-            logger.info("query_rewrite: need_rewrite=True, queries=%s", search_queries)
-        else:
-            logger.info("query_rewrite: need_rewrite=False, using original query")
-    except Exception:
-        logger.warning("query_rewrite failed, fallback to original query", exc_info=True)
 
-    # === Step 2: 直接搜索（每个 query 各搜一次） ===
-    all_sources = {}
-    combined_context_parts = []
+        # 检查是否有工具调用
+        if response.tool_calls:
+            # 把 assistant 的 tool_calls 追加到消息历史
+            messages.append({
+                "role": "assistant",
+                "content": response.text or "",
+                "tool_calls": [
+                    {"id": tc["id"], "name": tc["name"], "args": tc["args"]}
+                    for tc in response.tool_calls
+                ],
+            })
 
-    for i, query in enumerate(search_queries):
-        # 通知前端正在搜索
-        yield _sse_event("tool_call", {
-            "name": "search_knowledge_base",
-            "args": {"query": query[:50]},
-            "result": f"正在搜索 ({i+1}/{len(search_queries)})",
-        })
+            for tc in response.tool_calls:
+                tool_name = tc["name"]
+                tool_args = tc["args"]
+                tc_id = tc["id"]
 
-        result_text = await _exec_search_knowledge_base(query, user_id)
-        if not result_text or result_text.startswith("搜索结果为空"):
+                # 通知前端
+                yield _sse_event("tool_call", {
+                    "name": tool_name,
+                    "args": tool_args,
+                    "result": f"正在调用 {tool_name}",
+                })
+
+                result_text = await _execute_tool(tool_name, tool_args, user_id, question)
+                if result_text and not result_text.startswith("搜索结果为空"):
+                    all_raw_results.append(result_text)
+
+                new_sources = _extract_sources_from_result(result_text)
+                for s in new_sources:
+                    key = f"{s['doc_name']}_{s['page']}"
+                    if key not in all_sources or s["score"] > all_sources[key]["score"]:
+                        all_sources[key] = s
+
+                # 工具结果 -> OpenAI style tool message
+                messages.append({
+                    "role": "tool",
+                    "content": result_text,
+                    "tool_call_id": tc_id,
+                })
+
             continue
 
-        # 提取来源信息
-        new_sources = _extract_sources_from_result(result_text)
-        for s in new_sources:
-            key = f"{s['doc_name']}_{s['page']}"
-            if key not in all_sources or s["score"] > all_sources[key]["score"]:
-                all_sources[key] = s
+        # 文本回复 -> LLM 认为够了
+        if response.text:
+            messages.append({"role": "assistant", "content": response.text})
+            llm_raw_answer = response.text
+            break
 
-        combined_context_parts.append(result_text)
+        # 既无工具调用也无文本 -> 异常
+        raise RuntimeError("LLM response empty: no text and no tool_calls")
 
-    if not all_sources:
-        yield _sse_event("answer",
-            "抱歉，在知识库中没有找到与您问题相关的资料。请尝试换个方式提问，或上传相关文档。")
+    # ========== Phase 2: 流式输出最终答案 ==========
+
+    if all_sources:
+        stream_messages = []
+        if history:
+            for turn in history[-10:]:
+                stream_messages.append({"role": turn["role"], "content": turn["content"]})
+
+        context_str = "\n\n=======\n\n".join(all_raw_results) if all_raw_results else ""
+        answer_prompt = config.prompts["answer_generate"]["system"].format(context=context_str)
+        stream_messages.append({
+            "role": "user",
+            "content": f"参考资料：\n{context_str}\n\n用户问题：{question}",
+        })
+
+        full_answer = ""
+        try:
+            async for chunk in chat_stream_with_history(
+                messages=stream_messages,
+                system_prompt="你是一个专业的企业知识问答助手。根据搜索结果回答用户问题。不要输出来源引用信息。",
+                temperature=0.3,
+            ):
+                clean_chunk = _sanitize_answer(chunk)
+                if clean_chunk:
+                    full_answer += clean_chunk
+                    yield _sse_event("answer", clean_chunk)
+        except Exception as e:
+            logger.error("Agent streaming answer failed: %s", e)
+            if llm_raw_answer:
+                clean = _sanitize_answer(llm_raw_answer)
+                if clean:
+                    yield _sse_event("answer", clean)
+            else:
+                yield _sse_event("answer", "（生成答案时出错）")
+
+        not_found_keywords = ["未找到", "没有找到", "暂无", "没有相关", "未发现", "不存在对应内容"]
+        is_not_found = any(kw in full_answer for kw in not_found_keywords)
+        if not is_not_found:
+            yield _sse_event("sources", sorted(all_sources.values(), key=lambda x: x["score"], reverse=True)[:5])
         return
 
-    # 去重 + 排序 + top 5
-    sources_list = sorted(all_sources.values(), key=lambda x: x["score"], reverse=True)[:5]
-
-    # === Step 3: 流式生成答案 ===
-    context = "\n\n".join(combined_context_parts)
-
-    answer_prompt = config.prompts["answer_generate"]["system"].format(context=context)
-
-    # 用带上下文的 user message 替换原问题
-    messages[-1] = {
-        "role": "user",
-        "content": f"参考资料：\n{context}\n\n用户问题：{question}",
-    }
-
-    full_answer = ""
-    try:
-        async for chunk in chat_stream_with_history(
-            messages=messages,
-            system_prompt=answer_prompt,
-            temperature=0.3,
-        ):
-            full_answer += chunk
-            yield _sse_event("answer", chunk)
-    except Exception as e:
-        logger.error("Agent final answer stream failed: %s", e)
-        yield _sse_event("answer", "（生成答案时出错）")
+    if llm_raw_answer:
+        clean = _sanitize_answer(llm_raw_answer)
+        if clean:
+            yield _sse_event("answer", clean)
         return
 
-    # 答案输出完后再发 sources（如果 LLM 说未找到，就不展示来源）
-    not_found_keywords = ["未找到", "没有找到", "暂无", "没有相关", "未发现", "不存在对应内容"]
-    is_not_found = any(kw in full_answer for kw in not_found_keywords)
-    if sources_list and not is_not_found:
-        yield _sse_event("sources", sources_list)
+    yield _sse_event("answer", "抱歉，未能获取足够的信息，请尝试换个方式提问。")
 
 
 # ---------- SSE 工具函数 ----------
@@ -453,15 +456,6 @@ def _sanitize_answer(text: str) -> str:
     text = re.sub(r'</?tool_call[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'</?parameters[^>]*>', '', text, flags=re.IGNORECASE)
 
-    # 移除 Anthropic XML 标签（antml:parameter、antml:tool_result 等）
-    text = re.sub(r'</?antml:[^>]*>', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'</?function[^>]*>', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'</?invoke[^>]*>', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'</?tool_result[^>]*>', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'</?tool_call[^>]*>', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'</?parameters[^>]*>', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'</?parameter[^>]*>', '', text, flags=re.IGNORECASE)
-
     # 移除常见 HTML 标签但保留内容
     text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
     text = re.sub(r'</?p[^>]*>', '\n', text, flags=re.IGNORECASE)
@@ -476,13 +470,9 @@ def _sanitize_answer(text: str) -> str:
     text = re.sub(r'<[^>]+>', '', text)
 
     # 移除内联来源引用（来源由前端卡片组件展示，不应出现在回答文本中）
-    # 匹配: 来源：《xxx》第25-26页、《xxx》第26页
     text = re.sub(r'\n*\s*来源：《[^》]*》[^《]*?(?:、《[^》]*》[^《]*?)*\s*$', '', text)
-    # 匹配: 参考来源：《xxx》...
     text = re.sub(r'\n*\s*参考来源[:：].*$', '', text, flags=re.MULTILINE)
-    # 匹配: （来源：xxx）或 (来源：xxx)
     text = re.sub(r'[（(]来源[:：][^)）]*[)）]', '', text)
-    # 匹配单独一行的"来源：xxx"（整行都是来源引用）
     text = re.sub(r'^\s*来源[:：].*$', '', text, flags=re.MULTILINE)
 
     # 清理多余空行

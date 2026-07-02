@@ -32,7 +32,7 @@ function startStream(
   globalAnswer = ''
   globalSources = null
   globalToolStatus = null
-  globalStreamSessionId = sessionId || '__new__'
+  globalStreamSessionId = sessionId || `__pending_${Date.now()}_${Math.random().toString(36).slice(2, 8)}__`
   const controller = new AbortController()
   globalAbortController = controller
   notifyListeners()
@@ -101,6 +101,8 @@ export default function ChatPage() {
   const bottomRef = useRef<HTMLDivElement>(null)
   const messagesRef = useRef(messages)
   messagesRef.current = messages
+  const sessionIdRef = useRef<string | null>(sessionId)
+  sessionIdRef.current = sessionId
 
   // 仅当当前会话是流式会话时才同步 loading 状态
   const isCurrentSessionStreaming = globalLoading && (globalStreamSessionId === sessionId || globalStreamSessionId === '__new__')
@@ -136,7 +138,8 @@ export default function ChatPage() {
   // 订阅模块级状态，仅当前会话是流式会话时才同步
   useEffect(() => {
     const sync = () => {
-      const isActive = globalLoading && (globalStreamSessionId === sessionId || globalStreamSessionId === '__new__')
+      // 匹配已有会话的流 或 首页新建待分配的流
+      const isActive = globalLoading && (globalStreamSessionId === sessionId || (!sessionId && globalStreamSessionId?.startsWith('__pending_')))
       setLoading(isActive)
       setStreamingAnswer(isActive ? globalAnswer : '')
       setStreamingSources(isActive ? globalSources : null)
@@ -144,7 +147,11 @@ export default function ChatPage() {
     }
     globalListeners.add(sync)
     sync()
-    return () => { globalListeners.delete(sync) }
+    return () => {
+      globalListeners.delete(sync)
+      // 用户切到其他会话时，不 abort 旧流——让它在后台继续跑
+      // 用户切回来时，sync 函数会根据 globalStreamSessionId 重新同步状态
+    }
   }, [sessionId])
 
   // 缓存同步：messages 变化时写回 messageCache
@@ -160,8 +167,19 @@ export default function ChatPage() {
 
   const handleAsk = useCallback(async (q?: string) => {
     const question = q || input.trim()
-    if (!question || globalLoading) return
+    if (!question) return
     setInput('')
+
+    // 如果当前有流在运行且属于不同的会话，先 abort 旧的
+    if (globalLoading && globalAbortController && globalStreamSessionId !== (sessionId || '__pending__')) {
+      globalAbortController.abort()
+      globalLoading = false
+      globalStreamSessionId = null
+      globalAnswer = ''
+      globalSources = null
+      globalToolStatus = null
+    }
+    if (globalLoading) return
 
     const optimisticMsg: ConversationMessage = {
       id: 'temp-' + Date.now(),
@@ -178,26 +196,46 @@ export default function ChatPage() {
     messageCache.set(currentSid, updatedCache)
     setMessages(updatedCache)
 
+    // 记录这次流提问时的会话，用于 onFinalize 判断
+    const streamSession = currentSid
+
     startStream(question, sessionId, localStorage.getItem('token') || '', (newSessionId) => {
+      // 不管切没切走，把结果写入缓存（侧边栏需要 newSessionId）
       const finalAnswer = globalAnswer || '（已停止生成）'
       const finalSources = globalSources
-      // 从 __pending__ 缓存取出 optimistic message 并填入最终答案
-      const pending = messageCache.get(currentSid) || []
+      const pending = messageCache.get(streamSession) || []
       const updated = pending.map((m) =>
         m.id.startsWith('temp-') && !m.answer
           ? { ...m, answer: finalAnswer, sources: finalSources || [] }
           : m,
       )
-      // 同时写入两个 key：pending（当前渲染）+ 真实 ID（URL 更新后 useEffect 读取）
-      messageCache.set(currentSid, updated)
+      messageCache.set(streamSession, updated)
       if (newSessionId) {
         messageCache.set(newSessionId, updated)
-        setMessages(updated)
-        window.dispatchEvent(new Event('kqa-sessions-changed'))
-        setSearchParams({ s: newSessionId })
-      } else {
-        setMessages(updated)
       }
+
+      // 判断用户当前停留在哪个会话
+      const currentSidNow = sessionIdRef.current || '__pending__'
+
+      if (!newSessionId) {
+        // 流失败/被切走打断，不更新视图
+        if (currentSidNow === streamSession) {
+          setMessages(updated)
+        }
+        return
+      }
+
+      // 有 newSessionId：写入缓存 + 更新侧边栏
+      messageCache.set(newSessionId, updated)
+      window.dispatchEvent(new Event('kqa-sessions-changed'))
+
+      if (currentSidNow === streamSession || currentSidNow === newSessionId) {
+        // 用户还在这个会话 -> 更新视图
+        setMessages(updated)
+        setSearchParams({ s: newSessionId })
+      }
+      // 用户已经切走了 -> 数据已写入缓存，侧边栏也刷新了
+      // 用户点回这个会话时 useEffect 从缓存读到数据
     })
   }, [input, sessionId, setSearchParams])
 
@@ -211,14 +249,8 @@ export default function ChatPage() {
 
   // 监听 Sidebar 的新建对话事件
   const handleNewChatRef = useRef(() => {
-    if (globalLoading) {
-      globalAbortController?.abort()
-    }
-    globalLoading = false
-    globalAnswer = ''
-    globalSources = null
-    globalToolStatus = null
-    globalStreamSessionId = null
+    // 不 abort 旧流——让它在后台继续跑
+    // 用户切回去时通过 globalListeners 重新同步状态
     setMessages([])
     setSearchParams({})
   })

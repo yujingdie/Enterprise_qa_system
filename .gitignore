@@ -24,6 +24,9 @@ backend/revert_dedup.py
 backend/test_regex.py
 backend/add_streaming_sanitize.py
 
+# 评估报告（生成产物）
+backend/eval/reports/
+
 # Reranker 模型（太大，不入仓库）
 backend/reranker_model/
 

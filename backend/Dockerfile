@@ -39,16 +39,9 @@ RUN pip install --no-cache-dir --upgrade pip --retries 5 --timeout 120 --break-s
 RUN pip install --no-cache-dir --retries 5 --timeout 120 --break-system-packages \
         pytesseract
 
-# ===== Step 3: 预下载 Reranker 模型（通过 curl 跳过 SSL 验证） =====
-RUN mkdir -p /app/reranker_model && \
-    cd /app/reranker_model && \
-    curl -k -L -o config.json "https://hf-mirror.com/BAAI/bge-reranker-v2-m3/resolve/main/config.json" && \
-    curl -k -L -o tokenizer_config.json "https://hf-mirror.com/BAAI/bge-reranker-v2-m3/resolve/main/tokenizer_config.json" && \
-    curl -k -L -o tokenizer.json "https://hf-mirror.com/BAAI/bge-reranker-v2-m3/resolve/main/tokenizer.json" && \
-    curl -k -L -o vocab.txt "https://hf-mirror.com/BAAI/bge-reranker-v2-m3/resolve/main/vocab.txt" && \
-    curl -k -L -o special_tokens_map.json "https://hf-mirror.com/BAAI/bge-reranker-v2-m3/resolve/main/special_tokens_map.json" && \
-    curl -k -L -o model.safetensors "https://hf-mirror.com/BAAI/bge-reranker-v2-m3/resolve/main/model.safetensors" && \
-    echo "Reranker model downloaded OK"
+# ===== Step 3: 预下载 Reranker 模型 =====
+# 注：构建时跳过模型下载（hf-mirror 网络不稳定），容器启动后脚本会处理
+RUN mkdir -p /app/reranker_model && echo "Reranker model dir created"
 
 # 复制代码
 COPY . .
